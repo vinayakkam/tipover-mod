@@ -4,10 +4,10 @@ KSP 1 mod: rockets that tip over after landing, tip or sink after splashdown, or
 
 ## How it works
 - **Tipping:** a landed vessel tilted more than `tiltAngle` from the local terrain normal (raycast) for `failureDelay` seconds explodes. A vessel is only checked after it has been seen standing upright (tilt < half the limit) and is at least `minVesselHeight` tall. Planes, rovers, small capsules and vessels loaded already lying down are therefore ignored.
-- **Water:** same check against vertical with `splashTiltAngle`. Optionally, a splashed vessel whose centre of mass is more than `sinkDepth` m below sea level explodes.
+- **Water:** same check against vertical with `splashTiltAngle`, but a vessel falling over in the water explodes the moment its top part hits the water (no `failureDelay`). Optionally, a splashed vessel whose centre of mass is more than `sinkDepth` m below sea level explodes.
 - **Impact:** touching down with a descent rate above `impactSpeed` m/s (last airborne sample) explodes the vessel at once. Horizontal speed is ignored, so normal runway landings are safe.
 - **Chance:** `failureChance` < 1 lets a vessel survive; it is not re-rolled until the condition clears.
-- Destruction uses `Part.explode()` on every part (KSP's own explosion FX). Pad/runway (PRELAUNCH), EVA kerbals, flags, asteroids and packed (on-rails) vessels are never touched. Debris is off by default.
+- Destruction uses `Part.explode()` (KSP's own explosion FX). A few light parts (`debrisParts`) survive as wreckage; after `debrisSeconds` they lose buoyancy and colliders, sink into the water or ground and are removed. Pad/runway (PRELAUNCH), EVA kerbals, flags, asteroids and packed (on-rails) vessels are never touched. Spent stages (debris vessels) are not checked unless `includeDebris` is on.
 - Cost: one pass over loaded vessels 4 times a second, no allocations in steady state, no event subscriptions.
 
 ## Build
@@ -38,6 +38,8 @@ Edit `GameData/RocketFailure/settings.cfg`. Changes apply on the next flight sce
 | failureDelay | 3 | grace period, seconds |
 | failureChance | 1 | 0-1 |
 | includeDebris | false | check spent stages |
+| debrisParts | 3 | light parts left as wreckage after an explosion (0 = none) |
+| debrisSeconds | 20 | seconds before the wreckage sinks and is removed |
 
 ## Testing
 1. Land a tall rocket upright, then tip it with reaction wheels/RCS past 60 degrees. Expect "Vessel tipping over!" then an explosion after 3 s.
@@ -46,6 +48,8 @@ Edit `GameData/RocketFailure/settings.cfg`. Changes apply on the next flight sce
 4. Drop a sturdy vessel at > 20 m/s vertical: explodes on touchdown.
 5. Launch normally from the pad: nothing happens.
 Log lines are prefixed `[RocketFailure]` in `KSP.log`.
+
+Automated test with kOS (stock pad-hop rocket): see [test/README.md](test/README.md).
 
 ## Known limitations
 - Untested in game so far; see the commit history for build status.

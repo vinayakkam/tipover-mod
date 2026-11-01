@@ -12,6 +12,7 @@ namespace RocketFailure
         const float TickInterval = 0.25f;       // 4 Hz polling, no per-frame work
         const double DisarmHeight = 20;          // metres above ground before an armed vessel is considered "flying" again
         const int TerrainMask = (1 << 15) | (1 << 28); // Local Scenery + TerrainColliders
+        const float SinkSeconds = 6f;            // wreckage sinks this long before it is removed
 
         // ---- settings (GameData/RocketFailure/settings.cfg) ----
         static bool modEnabled = true;
@@ -27,6 +28,8 @@ namespace RocketFailure
         static float sinkDepth = 10f;
         static float impactSpeed = 20f;
         static float failureChance = 1f;
+        static int debrisParts = 3;
+        static float debrisSeconds = 20f;
 
         class State
         {
@@ -44,6 +47,15 @@ namespace RocketFailure
         readonly List<Guid> stale = new List<Guid>();
         readonly List<Part> partBuf = new List<Part>();
         int tick;
+
+        // Parts left over from an explosion. They float/lie around, then sink out of sight and are removed.
+        class Wreck
+        {
+            public Part part;
+            public float since;
+            public bool sinking;
+        }
+        readonly List<Wreck> wrecks = new List<Wreck>();
 
         void Start()
         {
@@ -85,6 +97,7 @@ namespace RocketFailure
             doomed.Clear();
             reasons.Clear();
 
+            if (wrecks.Count > 0) UpdateWrecks();
             if (tick % 40 == 0) Prune();
         }
 
@@ -127,7 +140,7 @@ namespace RocketFailure
             if (touchdown && impactEnabled && -s.lastVSpeed > impactSpeed)
                 return Roll(s) ? "impact at " + (-s.lastVSpeed).ToString("F1") + " m/s" : null;
 
-            bool tipped = false;
+            bool tipped = false, topInWater = false;
             if (landed ? tippingEnabled : splashTippingEnabled)
             {
                 Vector3 axis = v.ReferenceTransform.up;
@@ -140,6 +153,7 @@ namespace RocketFailure
                 if (!s.armed && tilt < limit * 0.5f && Height(v, axis) >= minVesselHeight)
                     s.armed = true;
                 tipped = s.armed && tilt > limit;
+                if (tipped && splashed) topInWater = TopInWater(v, axis);
             }
 
             bool sunk = splashed && sinkingEnabled && v.altitude < -sinkDepth;
@@ -151,6 +165,10 @@ namespace RocketFailure
                 return null;
             }
             if (s.spared) return null;
+
+            // A splashed vessel falling over is destroyed the moment its top hits the water, not after it settles.
+            if (topInWater)
+                return Roll(s) ? "hit the water tipping over" : null;
 
             if (s.dangerSince < 0f)
             {
@@ -196,6 +214,21 @@ namespace RocketFailure
             return max - min;
         }
 
+        // Is the part furthest along the vessel axis (the top) touching or below the water? Only called while tipped.
+        static bool TopInWater(Vessel v, Vector3 axis)
+        {
+            List<Part> ps = v.parts;
+            Vector3 o = v.transform.position;
+            Part top = null;
+            float max = float.MinValue;
+            for (int i = 0; i < ps.Count; i++)
+            {
+                float d = Vector3.Dot(ps[i].transform.position - o, axis);
+                if (d > max) { max = d; top = ps[i]; }
+            }
+            return top != null && (top.WaterContact || v.mainBody.GetAltitude(top.transform.position) < 0);
+        }
+
         void Explode(Vessel v, string reason)
         {
             if (v == null || v.state == Vessel.State.DEAD) return;
@@ -206,6 +239,7 @@ namespace RocketFailure
 
             // Copy first: explode() detaches parts and mutates v.parts. Leaves first so the tree doesn't split into new vessels.
             partBuf.AddRange(v.parts);
+            SpareWreckage();
             for (int i = partBuf.Count - 1; i >= 0; i--)
             {
                 Part p = partBuf[i];
@@ -213,6 +247,49 @@ namespace RocketFailure
                     p.explode();
             }
             partBuf.Clear();
+        }
+
+        // Leave a few light parts out of the explosion as wreckage (taken out of partBuf, so they are not exploded).
+        void SpareWreckage()
+        {
+            for (int k = 0, tries = 0; k < debrisParts && partBuf.Count > 1 && tries < 20; tries++)
+            {
+                int i = UnityEngine.Random.Range(0, partBuf.Count);
+                Part p = partBuf[i];
+                if (p == null || p.mass > 1f) continue;
+                partBuf.RemoveAt(i);
+                wrecks.Add(new Wreck { part = p, since = Time.time });
+                k++;
+            }
+        }
+
+        // After debrisSeconds the wreckage loses buoyancy and colliders, sinks into the water/ground and is removed.
+        void UpdateWrecks()
+        {
+            float now = Time.time;
+            for (int i = wrecks.Count - 1; i >= 0; i--)
+            {
+                Wreck w = wrecks[i];
+                Part p = w.part;
+                if (p == null || p.State == PartStates.DEAD || p.vessel == null)
+                {
+                    wrecks.RemoveAt(i);
+                    continue;
+                }
+                float age = now - w.since;
+                if (!w.sinking && age > debrisSeconds)
+                {
+                    w.sinking = true;
+                    p.buoyancy = 0f;
+                    Collider[] cs = p.GetComponentsInChildren<Collider>();
+                    for (int c = 0; c < cs.Length; c++) cs[c].enabled = false;
+                }
+                else if (w.sinking && (age > debrisSeconds + SinkSeconds || p.vessel.packed))
+                {
+                    wrecks.RemoveAt(i);
+                    p.Die();
+                }
+            }
         }
 
         void Prune()
@@ -248,6 +325,8 @@ namespace RocketFailure
             n.TryGetValue("sinkDepth", ref sinkDepth);
             n.TryGetValue("impactSpeed", ref impactSpeed);
             n.TryGetValue("failureChance", ref failureChance);
+            n.TryGetValue("debrisParts", ref debrisParts);
+            n.TryGetValue("debrisSeconds", ref debrisSeconds);
 
             tiltAngle = Mathf.Clamp(tiltAngle, 10f, 179f);
             splashTiltAngle = Mathf.Clamp(splashTiltAngle, 10f, 179f);
@@ -255,6 +334,8 @@ namespace RocketFailure
             sinkDepth = Mathf.Max(0f, sinkDepth);
             impactSpeed = Mathf.Max(1f, impactSpeed);
             failureChance = Mathf.Clamp01(failureChance);
+            debrisParts = Mathf.Clamp(debrisParts, 0, 20);
+            debrisSeconds = Mathf.Max(0f, debrisSeconds);
         }
     }
 }
